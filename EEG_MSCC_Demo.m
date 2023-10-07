@@ -1,0 +1,865 @@
+
+% Singl-Trial EEG using multi-set CC
+% Experiment CORE (Kappenman et al. 2021), P3 analysis
+% This demo has been provided by Reza Mahini, University of jyvaskyla, Finland
+% 2023
+% Find us at: r.mahini@gmail.com
+% % page: https://remahini.github.io/
+
+% Start for single-trila EE processing by typically k-means (here)
+% We will improve it in CC
+
+% The main steps:
+% 1- Trial analysis based on correlation and noise study then trial
+% selection
+% 2- we may play with tensor to provide better concatenating of the data
+% 3- The proper clustering configuration (based on stability and quality of clustering mehtods)
+% 4- Correlation analysis between trials and the determined template map
+% form grand averaged clustering (this can be used for trial selection)
+% 5- Consensus clustering and TW determination (inner-similarity, duration, topography, pp_statistical analysis)
+% 6- Statistical assessment of the results
+
+% if you find this demo useful please cite it as following :
+
+% [1] Mahini, R., Xu, P., Chen, G., Li, Y., Ding, W., Zhang, L.,... Qureshi, N. K., Hämä-läinen, T., Nandi, A. K., & Cong, F. (2022). Optimal Number of Clusters by Measuring Similarity Among Topographies for Spatio-Temporal ERP Analysis. Brain Topography. ...
+% https://doi.org/10.1007/s10548-022-00903-2.
+% [2] Mahini, R., Li, Y., Ding, W., Fu, R., Ristaniemi, T., Nandi, A. K., Chen, G., & Cong, F. (2020). Determination of the Time Window of Event-Related Potential Using Multiple-Set Consensus Clustering [Methods]. Frontiers in Neuroscience, 14(1047).  ...
+% https://doi.org/10.3389/fnins.2020.521595.
+% [3] Mahini, R., Zhang, G., Parviainen, T., Düsing, R., Nandi, A. K., Cong, F., & Hämäläinen, T. (2023). Brain Evoked Response Qualification Using Multi-set Consensus Clustering: Toward Single-trial EEG Analysis. Submitted to Psycho-physiology available as preprint at Authorea. ...
+% https://doi.org/10.22541/au.169600882.28722374/v1.
+
+
+close all
+clear
+
+load allSubjEEG.mat
+load allSubjERP.mat
+load chanlocs.mat
+
+% selected clustering methods for subjects --------------
+% you will need to run 'MN_plotEv_CC.m' script to obtain this list
+load subjMList.mat
+
+chanlocs=chanlocs(1:28);
+compSet={'P3'};
+stimSet={'cond1','cond2'};
+
+% interesting electrode site
+selChan={'CPz'};
+ch_loc=[14];
+
+% estimated number of clusters
+% see our manuscript mentioned above [1]
+k=6;
+
+% initializing ----------------------------------------------------------
+Chan=28;
+St=2;
+Subj=5;
+G=1;
+Sa=256;
+nSam=St*Sa;
+startEph=-200;
+endEph=800;
+com=1; % only one component
+stimSet={'Cond1','Cond2'};
+compSet={'P3'};
+% rough estimation of time window (experimentall TW)
+twStart=330;
+twEnd=550;
+
+
+% Data prepration -------------------------------------------------------
+allSubjEEG=allSubjEEG(1:5);
+allSubjERP=allSubjERP(1:28,:,1:2,1:5);
+
+inData=DimPrep(allSubjERP,Chan,Sa,St,Subj,G);
+% Channel x Sample x Stim x Subject x Group
+size(inData)
+
+[GA_ERP]=grand_ERP(inData,G);
+% Temporal concatenating ERP datasets
+[ERP_Subj,inDaGA_M1]=Data_Preparing(inData,Subj,St,Sa,G); % subjects data and grand average data modeled data
+
+% available clustering methods (see reference [1])
+clmethod={'K-means','Hierachial','FCM','SOM ','DFS', 'MKMS', 'AAHC', 'SPC', 'KMD', 'GMM'};
+
+% codes for clustering method
+% 1=K-means', 2= 'Hierachial', 3= 'FCM',4 ='SOM ','5 = DFS', 6= 'MKMS',...
+% 7= 'AAHC', 8= 'SPC', 9= 'KMD', 10='GMM'
+
+% This code can be run with the fixed list of clustering methods
+% M_list=[1 2 4 6 9]; %list for group average ERP
+Stb_list=[]; %[1 9]; % methods for stabilization
+rep=[]; %[3 3 3]; % repeats for stabilizing (see reference [2])
+stb=0; % 1 if stabilization needed
+
+%% Consensus clustering ---------------------------------------------
+
+[v,w]=time_conv_ts(Sa,twStart,twEnd,startEph,endEph);
+
+%  setting thresholds
+minSamThr=10;
+InSim_Thr=input('The inner similarity threshold 0 <InSim_Thr <1 (def. = 0.90)?');
+if isempty(InSim_Thr)
+    InSim_Thr=0.90; % **** Inner-similarity threshold, it lets to include map with ...
+end
+index=[];
+
+
+%% Single-trial EEG processing -------------------------------
+
+% Ground truth ERP obrained from group averaged ERP data
+load compGroup_CC_GT.mat % To obtain group component see (Ref. [1])
+
+tg2=input('You have two options: 1-selected trials (def enter 1) OR 2- normaly process (enter 0)');
+if isempty(tg2)
+    tg2=1;
+end
+
+% Trial selection sterategy:
+% 1- Clustering by CC and detecting candidate maps
+% 2- Correlation measurement between candidate maps and ground
+% truth from group averaged ERP clustering
+% 3- Optimizing and "initilization" parameters to save 50% of
+% trials
+
+% initialization for TW determination  -----------------------------------
+trcorrThr=0.65; % threshold for correlation between cluster maps and GT map
+InSim_Thr1=0.80;
+twStart1=300;
+twEnd1=600;
+
+for st=1:St
+
+    figure('Renderer','painters','Position', [20 20 900 500])
+
+    ttr=tiledlayout(ceil(Subj/4),8);
+
+    for s= 1:Subj % subjects
+        M_list=[];
+
+        % ______ Updated 14.04.2023
+        M_list=subjMList(s).voteMlist;
+        if or(isempty(M_list),length(M_list)<2)
+            M_list=[1 4 6 9];
+        end
+
+        y=[]; x1=[]; trClus=[]; chDtCorr=[]; selTrCls=[];
+        nbTr=size(allSubjEEG(s).cond(st).data,3);% _____
+
+        for t=1:nbTr
+            x1=allSubjEEG(s).cond(st).data(1:Chan,:,t)';
+            for ch=1:Chan
+                y(:,ch,t)=f_filterFFT(x1(:,ch)',2560,256,0.1,35); % x=signal, M=fs*10,
+                %figure; plot(x(:,i)'); hold on; plot(y(:,i));legend={'real','filtered'};
+                %hold off
+
+            end
+        end
+
+        allSubjEEG_fft(s).cond(st).data=y;
+
+        cnt=0; % counting the selected trials
+        mrkdTrl=[]; % marking the potential trials
+        mrkdTrl=zeros(1,nbTr);
+
+        for tr=1:nbTr  % all trials for first loop
+
+            Dt=squeeze(y(:,:,tr));
+            trClust_gen(st).sub(s).trl(tr)=Labeling_AllCls_smth(Dt,k,rep,stb,M_list,Stb_list); % generation step
+
+            trClus(:,tr)=CSPA(trClust_gen(st).sub(s).trl(tr).data,k); % consensus function for each trial
+
+            % _________ new Smoothing CC result Update 06042023
+            trClus(:,tr)=ccsmooth(Dt,trClus(:,tr));
+
+            % ___not necessary 04042023
+            chDtCorr_all(:,tr)=Dt(:,ch_loc);
+
+            % Saving the clusterings of each trail
+            subjTrails_CC(s).cond(st).CCTmp=trClus; % temprary saving
+            subjTrails_CC(s).cond(st).CCTrial=trClus; % all
+
+            % initialization -----------------------------------
+            tr_top=[]; tr_cndRslt=[]; crrBtrGA=[]; innrCorr=[]; winnID=[]; InnSimWcl=[];
+
+            tr_idx= trClus(:,tr); % fetching clustering of trial
+            [v1,w1]=time_conv_ts(Sa,twStart1,twEnd1,startEph,endEph);
+
+            % 'x1' replaced by 'Dt' _____Error fixed _____
+            [tr_cndRslt,tr_top,innrCorr,winnID,InnSimWcl]=...
+                Comp_detect_ERP_CC_Upd(tr_idx,Dt,chanlocs,k,Sa,1,v1,w1,com,stimSet,compSet,InSim_Thr1,minSamThr);
+
+            % ____ Update 06122022
+            % _____ Update v1, w1 used
+            [selected_TW,TWs_ms,selTWs_ms,sel_innerCorr,innsim,selPower_amp,selcorBW]=...
+                Sel_TW_Trial(tr_cndRslt,innrCorr,v1,w1,1,1,Sa,startEph,endEph,winnID,InnSimWcl,tr_top, compGroup_CC_GT.meantop);
+
+            % ______Results of each condition
+            ATr_resinfo(s).cond(st).trial(tr).innSim=innsim;
+            ATr_resinfo(s).cond(st).trial(tr).TWms=TWs_ms;
+            ATr_resinfo(s).cond(st).trial(tr).amp=selPower_amp.data;
+            ATr_resinfo(s).cond(st).trial(tr).crr=selcorBW.data;
+
+            % Assessment of trial based on existing any high
+            % correlated map (candidate maps) with ground truth
+            for i=1:size(tr_top.wcl,2)
+                crrBtrGA(i)=corr(compGroup_CC_GT.meantop(st,:)',tr_top.wcl(i).data');
+            end
+
+            if any(crrBtrGA>trcorrThr)>=1 % if any more than 1
+
+                cnt=cnt+1;
+                trSel(:,tr)=trClus(:,tr);
+                selTrCls(:,cnt)=trClus(:,tr);
+                chDtCorr(:,cnt)=Dt(:,ch_loc);
+                seltrls(s).cond(st).Tr(cnt,:,:)=Dt; % saving selected trials ______new 30112022
+                seltrls(s).cond(st).TrNo(cnt)=tr; % ___ test recording the selected trials' number 31.03.2023
+                mrkdTrl(tr)=tr;% _____Marking to remove selected trial from next step 03042023
+
+                % ____ Update 05122022
+                % _____ Update v1, w1 used
+                [selected_TW,TWs_ms,selTWs_ms,sel_innerCorr,innsim,selPower_amp,selcorBW]=...
+                    Sel_TW_Trial(tr_cndRslt,innrCorr,v1,w1,1,1,Sa,startEph,endEph,winnID,InnSimWcl,tr_top, compGroup_CC_GT.meantop);
+
+                % ______Results of each condition
+                STr_resinfo(s).cond(st).trial(cnt).innSim=innsim;
+                STr_resinfo(s).cond(st).trial(cnt).TWms=TWs_ms;
+                STr_resinfo(s).cond(st).trial(cnt).amp=selPower_amp.data;
+                STr_resinfo(s).cond(st).trial(cnt).crr=selcorBW.data;
+
+                % ______just to see the clustering of trials
+                %                         index=Indexing_M1(Sa,tr_idx,k,St,1);
+                %                         PlotAmp_1St(Dt,index,Sa,startEph,endEph,st,ch_loc,selChan,1,compSet,stimSet)
+
+            end
+            subjTrails_CC(s).cond(st).selTril=selTrCls; % saving clustering of the selected trials                     % ________________________________________________________
+            if cnt>1
+                subjTrails_CC(s).cond(st).selTrNo=seltrls(s).cond(st).TrNo;
+            end
+        end
+
+        % Somehow too much trials eliminated, we need to keep at
+        % least 50% of triasl forllowing the litereture (retuning) reference?
+
+        % New dataset from removing the previous selected trials
+
+        while and(or(isempty(selTrCls),size(selTrCls,2)<ceil(0.5*nbTr)),trcorrThr>0.4) % ceil(0.3*nbTr) ? _________27112022 to keep 30% of trials
+
+            % dynamic threshold adjustment (see reference [3])
+            trcorrThr=trcorrThr-0.05;
+            zmrktr=[];
+            zmrktr=find(mrkdTrl==0);
+
+            for i=1:length(zmrktr) % ____ % was nbTr or
+                tr=zmrktr(i); % ____
+                Dt=squeeze(y(:,:,tr)); % remained dataset
+                trClus(:,tr)=subjTrails_CC(s).cond(st).CCTmp(:,tr); % ______remained clusterings
+
+                % Trial selection -----------------------------
+                tr_idx= trClus(:,tr);
+
+                [tr_cndRslt,tr_top,innrCorr,winnID,InnSimWcl]=...
+                    Comp_detect_ERP_CC_Upd(tr_idx,Dt,chanlocs,k,Sa,1,v1,w1,com,stimSet,compSet,InSim_Thr1,minSamThr);
+
+                % Correlation test
+                for t1=1:size(tr_top.wcl,2)
+                    crrBtrGA(t1)=corr(compGroup_CC_GT.meantop(st,:)',tr_top.wcl(t1).data');
+                end
+
+                if any(crrBtrGA>trcorrThr)>=1 % def -> should not less than 0.40
+                    cnt=cnt+1;
+                    trSel(:,tr)=trClus(:,tr);
+                    selTrCls(:,cnt)=trClus(:,tr);
+                    chDtCorr(:,cnt)=Dt(:,ch_loc);
+
+                    % ____ results of selected trials
+                    % _____ Update v1, w1 used
+                    [selected_TW,TWs_ms,selTWs_ms,sel_innerCorr,innsim,selPower_amp,selcorBW]=...
+                        Sel_TW_Trial(tr_cndRslt,innrCorr,v1,w1,1,1,Sa,startEph,endEph,winnID,InnSimWcl,tr_top, compGroup_CC_GT.meantop(1,:));
+                    % ______Results of each condition
+                    STr_resinfo(s).cond(st).trial(cnt).innSim=innsim;
+                    STr_resinfo(s).cond(st).trial(cnt).TWms=TWs_ms;
+                    STr_resinfo(s).cond(st).trial(cnt).amp=selPower_amp.data;
+                    STr_resinfo(s).cond(st).trial(cnt).crr=selcorBW.data;
+
+                    seltrls(s).cond(st).Tr(cnt,:,:)=Dt; % ______new 30.11.2022
+                    seltrls(s).cond(st).TrNo(cnt)=tr; % ___ test recording the selected trials' number 31.03.2023
+
+                    mrkdTrl(tr)=tr;
+                end
+            end
+
+        end
+
+        subjTrails_CC(s).cond(st).selTril=selTrCls; % collecting selected trials' clustering
+        subjTrails_CC(s).cond(st).selTrNo=seltrls(s).cond(st).TrNo; % ____ trNo
+
+        %  Result of CC for each subject -------------------------
+
+        subSelTr_CC(:,s,st)=CSPA(selTrCls,k);
+        subTr_CC(:,s,st)=CSPA(trClus,k);
+
+        nexttile(ttr)
+        % plotting CC of individial trials
+        if tg2==1
+            imagesc(selTrCls')
+        else
+            imagesc(trClus')
+        end
+        ylabel('Trial #')
+        title(['Subj ',num2str(s), ' cond ', num2str(st)])
+
+        % Correlation for selected channel among trials
+        nexttile(ttr)
+        if tg2==1
+            corrTrial=corr(chDtCorr);
+        else
+            corrTrial=corr(chDtCorr_all);
+        end
+        imagesc(corrTrial)
+        caxis([-1 0.8])
+        title(['TrialCorr, subj ',num2str(s), ' cond ', num2str(st)])
+
+    end
+
+end
+
+% You choose which clusters do you want to process? ------------------------
+
+% Preparing CC of trials for each subject
+if tg2==1
+    sbjTr_CC=subSelTr_CC;   % selected trials processing (clusterings)
+else
+    sbjTr_CC= subTr_CC; % all trials for each subject processsing (clusterings)
+end
+for st=1:St
+    allSbjs_cond=squeeze(sbjTr_CC(:,:,st));
+    conSbjs_CC_cn(:,st)=CSPA(allSbjs_cond,k); % CC of all subjects for each condition
+end
+conSbjs_CC2=concatdata({conSbjs_CC_cn(:,1),conSbjs_CC_cn(:,2)});
+
+conSbjstrs=concatdata({squeeze(sbjTr_CC(:,:,1))',squeeze(sbjTr_CC(:,:,2))'})';
+
+% CC of all subjects
+conSbjs_CC1=CSPA(conSbjstrs,k);
+
+% CC of all subjects
+Clu_idx=conSbjs_CC2; %****clustering result for all subjects
+
+%% Evaluation the results of trial selection of subjects
+
+% Within subjects without considering single-trial
+
+if tg2==1
+    tr_resinfo=STr_resinfo;
+else
+    tr_resinfo=ATr_resinfo;
+end
+
+for s=1:Subj
+    for st=1:St
+        % scores from single-trials
+
+        Tr=size(tr_resinfo(s).cond(st).trial,2);
+        twTrSt=[];
+        twTrEd=[];
+        ampTr=[];
+        Trcorr=[];
+
+        for tr=1:Tr %size(tr_resinfo(s).cond(st).trial,2)
+            twTrSt(tr)=tr_resinfo(s).cond(st).trial(tr).TWms(2);
+            twTrEd(tr)=tr_resinfo(s).cond(st).trial(tr).TWms(3);
+            ampTr(tr)= tr_resinfo(s).cond(st).trial(tr).amp(14);
+            Trcorr(tr)=tr_resinfo(s).cond(st).trial(tr).crr;
+            Trinnsimm(tr)= tr_resinfo(s).cond(st).trial(tr).innSim;
+        end
+
+        % ***Scores from trials
+        sdtwTrSt(s,st)=std(twTrSt);
+        smeTWTrSt(s,st)=std(twTrSt)/sqrt(Tr);
+        sdtwTrEd(s,st)=std(twTrEd);
+        smeTWTrEd(s,st)=std(twTrEd)/sqrt(Tr);
+        sdtwTramp(s,st)=std(ampTr);
+        smeTWTramp(s,st)=std(ampTr)/sqrt(Tr);
+        sdtwcorr(s,st)=std(Trcorr);
+        smeTWTrcorr(s,st)=std(Trcorr)/sqrt(Tr);
+        sdtwinnsim(s,st)=std(Trinnsimm);
+        smeTWinnsim(s,st)=std(Trinnsimm)/sqrt(Tr);
+    end
+end
+
+%% if subject-by-subject plot is required
+
+close all
+sbjplt=1; % if we need subject results' plots
+
+if sbjplt==1
+
+    fg1=figure('Renderer','painters','Position',[50 50 900 700]);
+    tplwv=tiledlayout(ceil(Subj/4),4);
+    fg2=figure('Renderer','painters','Position',[50 50 900 700]);
+    tplcl=tiledlayout(ceil(Subj/4),4);
+
+    for s=1:Subj
+
+        subjERP=squeeze(ERP_Subj(:,:,s));
+        subjERP_conc=squeeze(allSubjERP(:,:,:,s));
+        sbclust = concatdata({squeeze(sbjTr_CC(:,s,1)), squeeze(sbjTr_CC(:,s,2))});
+        sbjClu_idx=sbclust;
+
+        %                 figure('Renderer','painters','Position',[20 20 700 400]);
+        %                 imagesc([conSbjs_con sbjClu_idx]')
+        %                 title('Clusterings of the subjects & CC')
+        %                 xlabel('Time point#')
+        %                 ylabel('Subject#')
+
+        % waveform and clustering plot
+        index=Indexing_M1(nSam,sbjClu_idx,k,St,1);
+        %                 PlotAmp_M1_SIM(subjERP,index,Sa,startEph,endEph,St,ch_loc,selChan,1,compSet,stimSet);
+
+
+        %  ____ *** New plot function and updates (just plot) 17.04.2023
+        %                 plottERP2condsOne(subjERP_conc,startEph,endEph,ch_loc)
+        % plotting the waveform from 'Pz' , std used from trials (real)
+
+        nexttile(tplwv)
+        % for condition2 with  different color
+        options.handle     = figure(1);
+        options.color_area = [243 169 114]./255;    % RBG Orange theme
+        options.color_line = [236 50  20]./255;
+        options.alpha=0.5;
+        options.line_width=1.5;
+        options.error='std';
+
+        plot_areaerrorbar(squeeze((allSubjEEG(s).cond(2).data(ch_loc,:,:)))', options)
+        r_timePlt(startEph,endEph,Sa,7) % ______ better plot
+        ylim([-20 55])
+        xlim([0 256])
+        title(['Subj ', num2str(s)]) %, '  cond ', int2str(2)]
+        % )
+
+        hold on
+
+        options.handle     = figure(1);
+        options.color_area = [128 193 219]./255;    % Blue theme
+        options.color_line = [ 20 20 255]./255;
+        options.alpha=0.5;
+        options.line_width=1.5;
+        options.error='std';
+
+        plot_areaerrorbar(squeeze((allSubjEEG(s).cond(1).data(ch_loc,:,:)))',options)
+        timePlt(startEph,endEph,Sa,7) % ______ better plot
+        ylim([-20 55])
+        xlim([0 256])
+        title(['Subj ', num2str(s)]) %, '  cond ', int2str(1)])
+        zer=Sa*(-startEph)/(endEph-startEph);
+
+        %                 xlim ([0 Sa]) % _____ Update 20210516
+        %                 ylim([-rngl,rngh])
+        xline(zer,'-','LineWidth',0.7)
+        yline(0,'-','LineWidth',0.7)
+        %                 grid on
+        box off
+
+        nexttile(tplcl)
+        imagesc(squeeze(sbjTr_CC(:,s,:))');
+        r_timePlt(startEph,endEph,Sa,7)
+        title(['Subj ', num2str(s)]) %, '  cond ', int2str(1)])
+        set(gca,'YTickLabel',[]);
+        %_______end of update
+
+
+        Comp_inf=[]; comp_pow=[]; innerCorr=[]; winnID=[]; InnSimWcl=[];
+
+        % _____ Update v1, w1 used
+        [Comp_inf,comp_pow,innerCorr,winnID,InnSimWcl]=...
+            Comp_detect_ERP_CC_Upd(sbjClu_idx,subjERP,chanlocs,k,Sa,St,v1,w1,com,stimSet,compSet,InSim_Thr,minSamThr);
+
+        %                 [selected_TW,TWs_ms,selTWs_ms,sel_innerCorr,InnSim,selPower_amp]=...
+        %                     Sel_TW_Upd(Comp_inf,innerCorr,v,w,St,1,Sa,startEph,endEph,winnID,InnSimWcl,comp_pow); % TWs selection algorithm
+
+        % ____ Update 30112022
+        % _____ Update v1, w1 used
+        [selected_TW,TWs_ms,selTWs_ms,sel_innerCorr,innsim,selPower_amp,selcorBWsbj]=...
+            Sel_TW_Trial(Comp_inf,innerCorr,v,w,St,1,Sa,startEph,endEph,winnID,InnSimWcl,comp_pow, compGroup_CC_GT.meantop);
+        %                 close all
+
+        % Topography plot didn't really work!!!
+        r_topplot(subjERP_conc,selected_TW,chanlocs,St,innsim); % Topography plot
+
+
+
+    end
+
+    % close
+
+else             % plotting the results on grand average ERP data
+
+    tg3=input('Do you need constant TW from all trials for all subjects (No (def= 0), yes=1) ?');
+    if isempty(tg3)
+        tg3=0;
+    end
+
+    if tg3==1
+
+        index=Indexing_M1(nSam,Clu_idx,k,St,1);
+        %       figure('Renderer','painters','Position', [50 50 700 400])
+        PlotAmp_M1_SIM(inDaGA_M1,index,Sa,startEph,endEph,St,ch_loc,selChan,1,compSet,stimSet);
+
+        Comp_inf=[]; comp_pow=[]; innerCorr=[]; winnID=[]; InnSimWcl=[];
+
+        % _____ Update v1, w1 used
+        [Comp_inf,comp_pow,innerCorr,winnID,InnSimWcl]=...
+            Comp_detect_ERP_CC_Upd(Clu_idx,inDaGA_M1,chanlocs,k,Sa,St,v1,w1,com,stimSet,compSet,InSim_Thr,minSamThr);
+
+            % _____ Update v1, w1 used
+        [selected_TW,TWs_ms,selTWs_ms,sel_innerCorr,innsim,selPower_amp,selcorBWsbj]=...
+            Sel_TW_Trial(Comp_inf,innerCorr,v,w,St,1,Sa,startEph,endEph,winnID,InnSimWcl,comp_pow, compGroup_CC_GT.meantop); % TWs selection algorithm
+
+        r_topplot(GA_ERP,selected_TW,chanlocs,St,innsim); % Topography plot
+
+        for st=1:St
+
+            compCorr=[];
+            compCorr=sel_innerCorr(st).data;
+            n=size(compCorr,1);
+            meanRow=sum(sum(compCorr,1))-n;
+            innSim(st)=meanRow/(n^2-n);
+
+            meantop_amp(st,:)=selPower_amp(st).data;
+
+        end
+
+        selTWs=selTWs_ms;
+        disp(compSet{com})
+        disp(selTWs)
+
+        compGroup_CC.innSimm=innSim; %  access innSim(st,g), st =stimulus, g= group
+        compGroup_CC.sel_TW=selected_TW;
+        compGroup_CC.idx=Clu_idx;
+        compGroup_CC.sel_TW_ms=selTWs; % ms
+        compGroup_CC.meantop=meantop_amp; % access meantop_amp(st,:,g)
+        % % %         compGroup_CC(count).comp(com).Corr(k).data=sel_innerCorr; % innerCorr
+
+        [SPSS_tab_avg]=ERP_statTable2_100s(selected_TW,inData,ch_loc,Subj,St,G);
+        SPSStab_avg=SPSS_tab_avg;
+
+        [ranova_tbl]=ranova_ERP_CORE(SPSS_tab_avg);
+        ranovatbl_all=ranova_tbl;
+
+        stim_pvalue(com,:)=ranova_tbl.pValue(3);
+        %____ Update: adding Eta2
+        Eta2=ranova_tbl.SumSq(3)/(ranova_tbl.SumSq(3)+ranova_tbl.SumSq(4));
+    end
+end % of if subject plot
+
+
+%% Evaluation the results of subjects
+InSim_Thr=0.85;
+minSamThr=10;
+%     % #
+for s=1:Subj %sb:sb % fro testing subject by subject
+
+    x2=squeeze(ERP_Subj(:,:,s));
+    tmp_sbjcl=squeeze(sbjTr_CC(:,s,:)); % ____ small update using subject's clustering
+    sbCl_idx=concatdata({tmp_sbjcl(:,1),tmp_sbjcl(:,2)});
+
+    Comp_inf=[]; comp_pow=[]; innerCorr=[]; winnID=[]; InnSimWcl=[];
+
+    % _____ Update v1, w1 used
+    [Comp_inf,comp_pow,innerCorr,winnID,InnSimWcl]=...
+        Comp_detect_ERP_CC_Upd(sbCl_idx,x2,chanlocs,k,Sa,St,v1,w1,com,stimSet,compSet,InSim_Thr,minSamThr);
+
+    % ____ Update 30112022
+    [selected_TW,TWs_ms,selTWs_ms,sel_innerCorr,innsim,selPower_amp,selcorBW]=...
+        Sel_TW_Trial(Comp_inf,innerCorr,v,w,St,1,Sa,startEph,endEph,winnID,InnSimWcl,comp_pow, compGroup_CC_GT.meantop); % TWs selection algorithm
+
+    sel_TWms_Sbj(s,:,:)=selTWs_ms;
+    selected_TW_Sbj(s,:,:)=selected_TW;
+
+    for st=1:St
+        % Calculation of inner similarity (MS1)
+        compCorr=[];
+        compCorr=sel_innerCorr(st).data;
+        n=size(compCorr,1);
+        meanRow=sum(sum(compCorr,1))-n;
+        innSim(st)=meanRow/(n^2-n);
+
+        meantop_amp(st,:)=selPower_amp(st).data;
+
+    end
+
+    selTWs=selTWs_ms;
+    disp(compSet{com})
+    disp(selTWs)
+
+    % #delete this
+    subjERP_conc=squeeze(allSubjERP(:,:,:,s));
+    r_topplot(subjERP_conc,selected_TW,chanlocs,St,innsim); % Topography plot
+    r_topplotM1(x2,selected_TW,chanlocs,St,innsim); % Topography plot
+
+    index=Indexing_M1(nSam,sbCl_idx,k,St,1);
+    PlotAmp_M1_SIM(x2,index,Sa,startEph,endEph,St,ch_loc,selChan,1,compSet,stimSet);
+    % #
+
+
+    compSbj_CC(s).comp(com).innSimm=innSim; %  access innSim(st,g), st =stimulus, g= group
+    compSbj_CC(s).comp(com).sel_TW=selected_TW;
+    compSbj_CC(s).comp(com).idx=sbCl_idx; % _____
+    compSbj_CC(s).comp(com).sel_TW_ms=selTWs; % ms
+    compSbj_CC(s).comp(com).meantop=meantop_amp; % access meantop_amp(st,:,g)
+    compSbj_CC(s).comp(com).selCorr=selcorBW; % note that selcorBW is a "structure" type
+end
+
+% Evaluation the results of subjects
+
+% ***Scores for the subjects
+for s=1:Subj
+    for st=1:St
+        sbjinnsim(s,:)= compSbj_CC(s).comp(com).innSimm;
+        sbjmenamp(s,st,:)=compSbj_CC(s).comp(com).meantop(st,ch_loc);
+        sbjTWSt(s,st,:)=compSbj_CC(s).comp(com).sel_TW_ms(st,2);
+        sbjTWEd(s,st,:)=compSbj_CC(s).comp(com).sel_TW_ms(st,3);
+        sbjcorr(s,st,:)=compSbj_CC(s).comp(com).selCorr(st).data;
+    end
+end
+
+%%  Bootstrapping Clustering and statistical measurments ----------------
+
+tg1=input('Do you need Bootstrapping (press 1 (yes) or 0 (def= no))?... (it miht take a bit long e.g., 24h :))');
+if isempty(tg1)
+    tg1=0;
+end
+rep=input('Set the number of repitations (def 1000)');
+if isempty(rep)
+    rep=1000;
+end
+btr_altr=[]; % making sure that no info from previous run exist
+
+trialGen=input('Number of virtual trial clusterings for each subject (def= same as sel/exist) other (e.g., 50)');
+% if isempty(trialGen)
+%     trialGen=50;
+% end
+% trialGen=50; % subjective number of virtual trial clusterings for each subject
+
+% Bootstrapping for each condition and subject from the trials
+
+if tg1==1
+    tic
+    g=1;
+    for s=1:Subj
+        for r=1:rep % 1000
+
+            disp(['subject' , num2str(s), ' ====>   repeat = ' num2str(r)]);
+
+            for st=1:St
+                reallist=[]; selidx=[];
+
+                % Randome trial set selection with replacement
+                % slSetTrCl=[];
+                if tg2==1 % chosing selected trials or exist trials
+                    if isempty(trialGen)
+                        trGen=size(randSmplRep(subjTrails_CC(s).cond(st).selTril),2); % original selected trials
+                    else
+                        trGen=trialGen;
+                    end
+                    [slSetTrCl,selidx]= randSmplRep(subjTrails_CC(s).cond(st).selTril,trGen);
+
+                    %___Update to know what trials really have selected in randomize selection
+                    for j=1:length(selidx)
+                        reallist(j)=subjTrails_CC(s).cond(st).selTrNo(selidx(j));
+                    end
+
+                else
+                    if isempty(trialGen)
+                        trGen=size(randSmplRep(subjTrails_CC(s).cond(st).CCTrial),2); % original trials
+                    else
+                        trGen=trialGen;
+                    end
+                    [slSetTrCl,selidx]= randSmplRep(subjTrails_CC(s).cond(st).CCTrial,trGen);
+                end
+
+                % _____ New try Calculating tW for trials 30.01.2023 -> worked
+                for tt=1:size(slSetTrCl,2)
+
+                    tr_top=[]; tr_cndRslt=[]; crrBtrGA=[]; innrCorr=[]; winnID=[]; InnSimWcl=[]; innsim=[];
+
+                    tr_idx= slSetTrCl(:,tt); % fetching clustering of trial
+
+                    if tg2==1
+                        x1=allSubjEEG_fft(s).cond(st).data(:,:,reallist(tt)); % ___using the trial data 02.04.2023
+                    else
+                        x1=allSubjEEG_fft(s).cond(st).data(:,:,selidx(tt));  % ___using the trial data 02.04.2023
+                    end
+
+
+                    [tr_cndRslt,tr_top,innrCorr,winnID,InnSimWcl]=...
+                        Comp_detect_ERP_CC_Upd(tr_idx,x1,chanlocs,k,Sa,1,v1,w1,com,stimSet,compSet,InSim_Thr1,minSamThr);
+
+                    [selected_TW,TWs_ms,selTWs_ms,sel_innerCorr,innsim,selPower_amp,selcorBW]=...
+                        Sel_TW_Trial(tr_cndRslt,innrCorr,v1,w1,1,1,Sa,startEph,endEph,winnID,InnSimWcl,tr_top, compGroup_CC_GT.meantop);
+
+                    % Bootstrap results from each condition
+                    % ----------------Warning !!!!!!------------------
+                    btr_altr(s).cond(st).rep_insim(r,tt)=innsim;
+                    btr_altr(s).cond(st).rep_TW_St(r,tt)=TWs_ms(2);
+                    btr_altr(s).cond(st).rep_TW_Ed(r,tt)=TWs_ms(3);
+                    btr_altr(s).cond(st).rep_amp(r,tt)=selPower_amp.data(ch_loc);
+                    btr_altr(s).cond(st).rep_corr(r,tt)=selcorBW.data;
+
+                end
+                % _________ EOU (end of update)
+                % CC of trials of each condition for each subject
+                slSetTrCl_CC(:,st)=CSPA(slSetTrCl,k);
+
+            end
+
+            % For each subject and each repeat, TW determination of the selected trials
+            Clu_idx=concatdata({slSetTrCl_CC(:,1),slSetTrCl_CC(:,2)});
+
+            clustSubj(:,s,r)=Clu_idx;
+            sbCl_idx=Clu_idx;
+
+            x2=squeeze(ERP_Subj(:,:,s));
+
+            % Scoring (TW, InnSim, etc.) -------------------------
+
+            Comp_inf=[]; comp_pow=[]; innerCorr=[]; winnID=[]; InnSimWcl=[]; innsim1=[];
+            [Comp_inf,comp_pow,innerCorr,winnID,InnSimWcl]=Comp_detect_ERP_CC_Upd(sbCl_idx,x2,chanlocs,k,Sa,St,v1,w1,com,stimSet,compSet,InSim_Thr,minSamThr);
+
+            % ____ Update 30112022
+            % correlation based vs using overlapping parameter
+            [selected_TW,TWs_ms,selTWs_ms,sel_innerCorr,innsim1,selPower_amp,BselcorBW]=...
+                Sel_TW_Trial(Comp_inf,innerCorr,v,w,St,g,Sa,startEph,endEph,winnID,InnSimWcl,comp_pow, compGroup_CC_GT.meantop); % TWs selection algorithm
+
+            % scores from the subject's TWs
+            Rep_sbtr_TW(r,s,:,:)=selected_TW;
+            Rep_sbtr_TW_ms(r,s,:,:)=selTWs_ms;
+            Rep_sbtr_innsim(r,s,:)=innsim1;
+
+            for st=1:St
+                % TW score need to be calculated (mv)
+                scr_pw(r,s,st)=selPower_amp(st).data(ch_loc);
+                Rep_corrBWsbj(r,s,st)= BselcorBW(st).data; % note that the "BselcorBW" is structure type !!!trouble
+                % extra scores can be used compare to ground truth
+                Rep_sbtr_GFP(r,s,st)=GFP(selPower_amp(st).data);
+            end
+        end
+    end
+
+    toc
+    % End of repetition -------------------------
+    %% Scoring, bSME and ME(SME) calculation, and statistical evaluation
+
+    % bSME, ME(SME) calculation including plotting the results
+
+    for st=1:St
+
+        % Scoring of each subject and condition -------------------
+        for s=1:Subj
+
+            % SD of scores for the repeats (ols method) might not correct!
+            twSt=squeeze(Rep_sbtr_TW_ms(:,s,st,2)); % start(ms) from trials
+            boot_twSt(s,st)=std(twSt)/sqrt(rep);
+            twEd=squeeze(Rep_sbtr_TW_ms(:,s,st,3)); % end(ms) from trials
+            boot_twEd(s,st)=std(twEd)/sqrt(rep);
+            boot_mv(s,st)=std(scr_pw(:,s,st),0,1);
+            boot_corr(s,st)=std(Rep_corrBWsbj(:,s,st))/sqrt(rep);
+            boot_innsimm(s,st)=std(Rep_sbtr_innsim(:,s,st))/sqrt(rep);
+
+            % Calculating SE for each repeat and then mean of them to
+            % Calculating bSME **** --------------------------------------
+
+            % access array(s,st,tt,r)
+            tt=size(btr_altr(s).cond(st).rep_amp(r,:),2); % number of trials
+
+            % this line is not necessary , you can delete later on
+            se_btramp=[]; se_btrinsim=[]; se_btrTWSt=[]; se_btrTWEd=[]; se_btrcorr=[];
+
+            for r=1:rep % trials for each repeat (correct)
+                se_btramp(r)=std(btr_altr(s).cond(st).rep_amp(r,:))/sqrt(tt);
+                se_sqbtramp(r)=(std(btr_altr(s).cond(st).rep_amp(r,:))/sqrt(tt))^2; % test
+                se_btrinsim(r)=std(btr_altr(s).cond(st).rep_insim(r,:))/sqrt(tt);
+                se_sqbtrinsim(r)=(std(btr_altr(s).cond(st).rep_insim(r,:))/sqrt(tt))^2;
+                se_btrTWSt(r)=std(btr_altr(s).cond(st).rep_TW_St(r,:))/sqrt(tt);
+                se_sqbtrTWSt(r)=(std(btr_altr(s).cond(st).rep_TW_St(r,:))/sqrt(tt))^2;
+                se_btrTWEd(r)=std(btr_altr(s).cond(st).rep_TW_Ed(r,:))/sqrt(tt);
+                se_sqbtrTWEd(r)=(std(btr_altr(s).cond(st).rep_TW_Ed(r,:))/sqrt(tt))^2;
+                se_btrcorr(r)=std(btr_altr(s).cond(st).rep_corr(r,:))/sqrt(tt);
+                se_sqbtrcorr(r)=(std(btr_altr(s).cond(st).rep_corr(r,:))/sqrt(tt))^2;
+
+            end
+
+            %*** calculating bSME for interesting scores
+
+            % RMS of errors
+            bsme_sq_btramp(s,st)=sqrt(sum(se_sqbtramp)/rep);
+            bsme_sq_btrinsim(s,st)=sqrt(sum(se_sqbtrinsim)/rep);
+            bsme_sq_btrTWSt(s,st)=sqrt(sum(se_sqbtrTWSt)/rep);
+            bsme_sq_btrTWEd(s,st)=sqrt(sum(se_sqbtrTWEd)/rep);
+            bsme_sq_btrcorr(s,st)=sqrt(sum(se_sqbtrcorr)/rep);
+
+        end
+
+        for r=1:rep
+
+            selected_TW_Sbj(:,:,:,1)=squeeze(Rep_sbtr_TW(r,:,:,:));
+            [SPSS_tab_avg]=ERP_statTabl_Sb(selected_TW_Sbj,inData,ch_loc,Subj,St,G);
+            SPSStab_avg=SPSS_tab_avg;
+
+            [ranova_tbl_Sb]=ranova_ERP_CORE(SPSS_tab_avg);
+            ranovatbl_all=ranova_tbl_Sb;
+
+            boot_stim_pvalue(r,:)=ranova_tbl_Sb.pValue(3);
+            boot_F_value(r,:)=ranova_tbl_Sb.F(3);
+            %____ Update: adding Eta2
+            boot_Eta2(r,:)=ranova_tbl_Sb.SumSq(3)/(ranova_tbl_Sb.SumSq(3)+ranova_tbl_Sb.SumSq(4));
+
+            boot_ranova_Sb(r).data=ranova_tbl_Sb;
+
+        end
+
+        % EOU __________________________________________________
+
+        % MS(bSME)
+        MSbsmeamp(st)= mean(bsme_sq_btramp(:,st).^2);
+        MSbsmeinsim(st)= mean(bsme_sq_btrinsim(:,st).^2);
+        MSbsmeTWSt(st)= mean(bsme_sq_btrTWSt(:,st).^2);
+        MSbsmeTWEd(st)=mean(bsme_sq_btrTWEd(:,st).^2);
+        MSbsmecorr(st)= mean(bsme_sq_btrcorr(:,st).^2);
+
+        % within subject metrics (ols method) might incorrect*
+        MSboottwSt(st)= mean(boot_twSt(:,st).^2);
+        MSboottwEd(st)= mean(boot_twEd(:,st).^2);
+        MSbootscrmv(st)=mean(boot_mv(:,st).^2);
+        MSbootinnsim(st)= mean(boot_innsimm(:,st).^2);
+
+    end
+
+end % end of Bootstrapping
+
+
+%% Statistical power analysis for within factors (Stim x Chann) -----------
+
+function [ranova_tbl]=ranova_ERP_CORE(SPSS_tab_avg)
+
+Rdata=SPSS_tab_avg(:,2:3);
+
+Group={'G1';'G1';'G1';'G1';'G1'};
+
+varNames={'Group','St1','St2'};
+
+tbl = table(Group,Rdata(:,1),Rdata(:,2),'VariableNames',varNames);
+
+factNames = {'Stim'};
+
+within_R = table({'St1';'St2'},'VariableNames',factNames);
+
+rm = fitrm(tbl,'St1-St2~1','WithinDesign',within_R);
+
+[ranova_tbl] = ranova(rm, 'WithinModel','Stim');
+end
+
+%% End
