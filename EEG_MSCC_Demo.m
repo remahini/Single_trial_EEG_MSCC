@@ -55,7 +55,7 @@ k=6;
 % initializing ----------------------------------------------------------
 Chan=28;
 St=2;
-Subj=5;
+Subj=4; % as a demo data for 4 subjects
 G=1;
 Sa=256;
 nSam=St*Sa;
@@ -70,8 +70,8 @@ twEnd=550;
 
 
 % Data prepration -------------------------------------------------------
-allSubjEEG=allSubjEEG(1:5);
-allSubjERP=allSubjERP(1:28,:,1:2,1:5);
+allSubjEEG=allSubjEEG(1:Subj);
+allSubjERP=allSubjERP(1:28,:,1:2,1:Subj);
 
 inData=DimPrep(allSubjERP,Chan,Sa,St,Subj,G);
 % Channel x Sample x Stim x Subject x Group
@@ -132,7 +132,7 @@ twEnd1=600;
 
 for st=1:St
 
-    figure('Renderer','painters','Position', [20 20 900 500])
+    figure('Renderer','painters','Position', [50 100 1200 300])
 
     ttr=tiledlayout(ceil(Subj/4),8);
 
