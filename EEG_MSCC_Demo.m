@@ -847,7 +847,7 @@ function [ranova_tbl]=ranova_ERP_CORE(SPSS_tab_avg)
 
 Rdata=SPSS_tab_avg(:,2:3);
 
-Group={'G1';'G1';'G1';'G1';'G1'};
+Group={'G1';'G1';'G1';'G1'};
 
 varNames={'Group','St1','St2'};
 
