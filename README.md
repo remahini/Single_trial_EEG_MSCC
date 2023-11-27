@@ -8,7 +8,7 @@ If you find this toolbox entirely or partially useful, please kindly reference t
 
 [2] Mahini, R., Li, Y., Ding, W., Fu, R., Ristaniemi, T., Nandi, A. K., Chen, G., & Cong, F. (2020). Determination of the Time Window of Event-Related Potential Using Multiple-Set Consensus Clustering [Methods]. Frontiers in Neuroscience, 14(1047).(URL)[https://doi.org/10.3389/fnins.2020.521595]
 
-[3] Mahini, R., Zhang, G., Parviainen, T., Düsing, R., Nandi, A. K., Cong, F., & Hämäläinen, T. (2023). Brain Evoked Response Qualification Using Multi-set Consensus Clustering: Toward Single-trial EEG Analysis. Submitted to Psycho-physiology available as a preprint at Authorea. (URL)[https://doi.org/10.22541/au.169600882.28722374/v1]
+[3] Mahini, R., Zhang, G., Parviainen, T., Düsing, R., Nandi, A. K., Cong, F., & Hämäläinen, T. (2023). Brain Evoked Response Qualification Using Multi-set Consensus Clustering: Toward Single-trial EEG Analysis. Submitted to Brain Topography available as a preprint at (URL)[https://doi.org/10.21203/rs.3.rs-3586574/v1]
 
 
 ## How to use this toolbox
